@@ -470,3 +470,225 @@ aws ec2 modify-instance-metadata-options \
 ### Private Registry (Amazon ECR)
 
 See `registries.yml` for the ECR configuration. The recommended approach on EC2 is to attach the `AmazonEC2ContainerRegistryReadOnly` IAM policy to the instance profile — no static credentials are needed.
+
+
+# Assignment 1 — K3s HA Cluster on AWS
+
+**Student Name:** Emeal Dekoker
+**Student Number:** 204510082
+**GitHub Repo:** https://github.com/cput-it-advdip/open5g-on-aws-ec2-Emeal41
+
+---
+
+## System Requirements
+
+| Component | Specification |
+|-----------|--------------|
+| Instance Type | t3.large |
+| CPU | 2 vCPU |
+| RAM | 8 GiB |
+| Storage | 8 GB SSD |
+| OS | Ubuntu 22.04 LTS |
+| Nodes | 3 x Master (control plane) |
+| Region | us-east-1 (N. Virginia) |
+
+---
+
+## Architecture
+
+### What is K3s?
+K3s is a lightweight, certified Kubernetes distribution built for resource-constrained environments. It packages the entire Kubernetes control plane into a single binary under 100MB, making it ideal for edge computing, IoT, and cloud deployments where cost and simplicity matter. Unlike full Kubernetes, K3s removes legacy and alpha features while keeping full certification and compatibility.
+
+### Why K3s on AWS?
+- Lighter than full Kubernetes — uses less CPU and RAM
+- Embedded etcd means no external database needed
+- Fast to deploy — ideal for learning and prototyping
+- Still production-grade and fully certified
+- Perfect for simulating 5G edge deployments
+
+### Key Components
+
+**Control Plane (3 x Master Nodes)**
+The control plane manages the entire cluster. It runs the API server, scheduler, and controller manager across all 3 master nodes. Having 3 nodes ensures High Availability — if one node fails the other two keep the cluster running without interruption. Each node also runs embedded etcd for distributed state storage.
+
+**Agents (Worker Nodes)**
+In this deployment the master nodes also act as workers since K3s allows workloads to run on control plane nodes. Dedicated agent nodes can be added later by joining them with the server token.
+
+**Container Runtime (containerd)**
+K3s uses containerd as its default container runtime. containerd is responsible for pulling container images and running containers on each node. It is lightweight and purpose-built for Kubernetes workloads.
+
+**CNI — Flannel**
+Flannel is the default Container Network Interface for K3s. It gives each pod its own unique IP address and enables pods to communicate across different nodes using VXLAN tunneling over UDP port 8472.
+
+**Ingress / Load Balancer — NGINX Ingress Controller**
+The NGINX Ingress Controller manages external HTTP and HTTPS traffic into the cluster. It acts as a reverse proxy, routing incoming requests to the correct Kubernetes service based on rules defined in Ingress resources.
+
+**Storage — Local Path Provisioner**
+K3s ships with a built-in local-path-provisioner that dynamically creates PersistentVolumes on the node's local disk when a pod requests storage through a PersistentVolumeClaim. This is ideal for development and testing environments.
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  AWS EC2 (us-east-1)                │
+│                                                     │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐   │
+│  │  master-1   │ │  master-2   │ │  master-3   │   │
+│  │172.31.41.103│ │172.31.44.54 │ │172.31.44.167│   │
+│  │    etcd    ◄──►    etcd    ◄──►    etcd     │   │
+│  │  API server │ │             │ │             │   │
+│  │  scheduler  │ │             │ │             │   │
+│  └─────────────┘ └─────────────┘ └─────────────┘   │
+│         │               │               │           │
+│         └───────────────┴───────────────┘           │
+│                     Flannel CNI                     │
+│                  (VXLAN UDP 8472)                   │
+│                                                     │
+│              NGINX Ingress Controller               │
+│           Local Path Storage Provisioner            │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Environment Setup
+
+### 1. AWS Infrastructure
+
+#### Security Group (k3s-ha-sg) Inbound Rules
+
+| Port | Protocol | Purpose | Source |
+|------|----------|---------|--------|
+| 22 | TCP | SSH access | 0.0.0.0/0 |
+| 6443 | TCP | Kubernetes API server | 0.0.0.0/0 |
+| 2379-2380 | TCP | etcd peer communication | k3s-ha-sg |
+| 10250 | TCP | Kubelet API | k3s-ha-sg |
+| 8472 | UDP | Flannel VXLAN overlay | k3s-ha-sg |
+| 30000-32767 | TCP | NodePort services | 0.0.0.0/0 |
+
+#### EC2 Instances Provisioned
+
+| Instance | Private IP | Public IP |
+|----------|-----------|-----------|
+| k3s-master-1 | 172.31.41.103 | 35.171.151.218 |
+| k3s-master-2 | 172.31.44.54 | 54.167.203.228 |
+| k3s-master-3 | 172.31.44.167 | 52.73.117.53 |
+
+### 2. Node Preparation (run on all 3 nodes)
+
+```bash
+sudo hostnamectl set-hostname k3s-master-X
+sudo apt-get update && sudo apt-get upgrade -y
+sudo timedatectl set-timezone UTC
+sudo swapoff -a
+sudo tee -a /etc/hosts <<EOF
+172.31.41.103  k3s-master-1
+172.31.44.54   k3s-master-2
+172.31.44.167  k3s-master-3
+EOF
+```
+
+### 3. Install K3s on Master-1 (Control Plane Leader)
+
+```bash
+sudo mkdir -p /etc/rancher/k3s
+sudo tee /etc/rancher/k3s/config.yaml <<EOF
+cluster-init: true
+node-ip: 172.31.41.103
+advertise-address: 172.31.41.103
+tls-san:
+  - 172.31.41.103
+  - 35.171.151.218
+  - k3s-master-1
+disable: [servicelb, traefik]
+EOF
+curl -sfL https://get.k3s.io | sh -
+```
+
+### 4. Join Master-2 to Cluster
+
+```bash
+sudo mkdir -p /etc/rancher/k3s
+sudo tee /etc/rancher/k3s/config.yaml <<EOF
+server: https://172.31.41.103:6443
+token: K10ec0c07424066170266b26cf49255a695e443fb4a6c9868863359ab57916d41cd::server:874123ff986e18d88b8a354a4651f14e
+node-ip: 172.31.44.54
+advertise-address: 172.31.44.54
+tls-san:
+  - 172.31.44.54
+  - 54.167.203.228
+  - k3s-master-2
+disable: [servicelb, traefik]
+EOF
+curl -sfL https://get.k3s.io | sh -s - server
+```
+
+### 5. Join Master-3 to Cluster
+
+```bash
+sudo mkdir -p /etc/rancher/k3s
+sudo tee /etc/rancher/k3s/config.yaml <<EOF
+server: https://172.31.41.103:6443
+token: K10ec0c07424066170266b26cf49255a695e443fb4a6c9868863359ab57916d41cd::server:874123ff986e18d88b8a354a4651f14e
+node-ip: 172.31.44.167
+advertise-address: 172.31.44.167
+tls-san:
+  - 172.31.44.167
+  - 52.73.117.53
+  - k3s-master-3
+disable: [servicelb, traefik]
+EOF
+curl -sfL https://get.k3s.io | sh -s - server
+```
+
+### 6. Verify Cluster
+
+```bash
+sudo kubectl get nodes
+sudo kubectl get pods -A
+```
+
+### 7. Deploy Test Application
+
+```bash
+git clone https://github.com/cput-it-advdip/-K3S-AWS.git
+cd ./-K3S-AWS
+sudo kubectl apply -f web-app.yml
+curl http://localhost:30080
+```
+
+### 8. NGINX Ingress Controller
+
+```bash
+sudo cp nginx-ingress.yml /var/lib/rancher/k3s/server/manifests/nginx-ingress.yaml
+sudo kubectl -n ingress-nginx get pods
+```
+
+### 9. Persistent Storage
+
+```bash
+sudo kubectl create -f pvc.yaml
+sudo kubectl create -f pod.yaml
+sudo kubectl get pvc
+```
+
+---
+
+## Evidence of Deployment
+
+### AWS Console — EC2 Instances Running
+![EC2 Instances](screenshots/1-ec2-instances.png)
+
+### Terminal Output — Successful K3s Installation
+![Install Success](screenshots/2-install-success.png)
+
+### All Nodes Ready
+![kubectl get nodes](screenshots/3-nodes-ready.png)
+
+### All Pods Running
+![kubectl get pods -A](screenshots/4-pods-all.png)
+
+---
+
+## Reflection
+
