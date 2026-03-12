@@ -692,3 +692,22 @@ sudo kubectl get pvc
 
 ## Reflection
 
+### Overview
+This assignment had me deploy a 3-node HA K3s cluster on AWS EC2. It was my first time actually working with Kubernetes and the first time I'd set up anything at this scale in a cloud environment.
+
+### Challenges - Internet Connectivity
+The first thing that broke was internet connectivity. K3s kept failing to install with no useful error, and I spent a while just confused. Eventually I found it: the security group only allowed outbound traffic on port 22 and 6443, so the instances couldn't reach the internet and the binary never downloaded. Adding an All Traffic outbound rule fixed it. Once I could ping 8.8.8.8, K3s installed on the first try.
+
+### Challenges - Terminal Freezing
+The browser terminal also kept freezing from inactivity. Reconnecting fixed it each time, and I eventually realized nothing was actually lost since all the work lives on the instance itself, not in the browser session. I also picked up a small habit of running clear before any command I needed to screenshot.
+
+### What I Learned
+K3s packages the entire control plane into a single binary and uses an embedded etcd, so there's no external datastore to configure. Compared to full Kubernetes, the setup is much simpler. The 3-node configuration provides HA because etcd can hold quorum with just two nodes if one goes down.
+
+### K3s and 5G Cloud-Native Concepts
+What I didn't expect to find interesting was the 5G connection. Modern telecom networks run containerized network functions at the edge rather than on dedicated hardware, and K3s fits that environment well since it's resource-light but still fully Kubernetes-compatible. The cluster architecture I built here is close to what gets deployed at actual base stations to run user plane and RAN components.
+
+### Virtualization and Containerization
+The underlying idea across all of this is that virtualization lets multiple VMs share physical hardware, and Kubernetes takes that further by running multiple workloads on a single kernel. Services scale without new hardware. For 5G, where traffic patterns are unpredictable and the device counts are enormous, that matters a lot.
+
+
